@@ -8,7 +8,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import config
-from bot.db import init_db
+from bot.db import init_db, get_active_products
+from bot.seed import seed as seed_catalog
 from bot.handlers.client import router as client_router
 from bot.handlers.admin import router as admin_router
 from bot.scheduler import setup_scheduler
@@ -27,6 +28,12 @@ async def main() -> None:
 
     await init_db()
     logger.info("Database initialized")
+
+    # Auto-seed catalog on first run
+    existing = await get_active_products()
+    if not existing:
+        await seed_catalog()
+        logger.info("Catalog seeded with MiniMelts products")
 
     bot = Bot(token=config.bot_token)
     dp = Dispatcher(storage=MemoryStorage())

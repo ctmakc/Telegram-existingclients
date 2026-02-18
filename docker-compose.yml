@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  bot:
+    # ---- ЗАМЕНИ на свой GitHub username/repo ----
+    image: ghcr.io/YOUR_GITHUB_USERNAME/telegram-existingclients:latest
+    container_name: minimelts-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - bot-data:/app/data
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: minimelts-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_LABEL_ENABLE=true
+    # Watchtower каждые 5 мин проверяет новый образ в GHCR
+
+volumes:
+  bot-data:

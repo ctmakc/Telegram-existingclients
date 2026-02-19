@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -8,10 +10,11 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from bot import db
 from bot.config import config
 from bot.keyboards import admin_main_kb, catalog_kb, client_actions_kb, client_list_kb
-from bot.locales import action_labels, normalize_lang, status_text, t
+from bot.locales import action_labels, status_text, t
 from bot.utils.excel import generate_excel
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class AddProduct(StatesGroup):
@@ -53,7 +56,7 @@ async def open_orders(message: Message) -> None:
             await message.bot.send_message(client["telegram_id"], t(client_lang, "admin_open_notice"))
             sent += 1
         except Exception:
-            continue
+            logger.warning("Failed to notify client %s about open session", client["telegram_id"])
 
     await message.answer(
         t(lang, "session_opened", id=session_id, sent=sent, total=len(clients)),
@@ -322,7 +325,7 @@ async def approve_client(callback: CallbackQuery) -> None:
             reply_markup=menu_kb(client_lang, mode),
         )
     except Exception:
-        pass
+        logger.exception("Failed to notify approved client %s", client["telegram_id"])
 
 
 @router.callback_query(F.data.startswith("client:block:"))
@@ -361,6 +364,6 @@ async def remind_clients(message: Message) -> None:
             await message.bot.send_message(client["telegram_id"], t(client_lang, "admin_remind_notice"))
             sent += 1
         except Exception:
-            continue
+            logger.warning("Failed to send reminder to %s", client["telegram_id"])
 
     await message.answer(t(lang, "remind_sent", sent=sent, total=len(clients)))

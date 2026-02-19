@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -18,9 +18,10 @@ from bot.keyboards import (
     mode_kb,
     skip_product_kb,
 )
-from bot.locales import action_match, b, normalize_lang, t
+from bot.locales import action_match, normalize_lang, t
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class Registration(StatesGroup):
@@ -166,7 +167,7 @@ async def registration_company(message: Message, state: FSMContext) -> None:
                 reply_markup=approve_client_kb(client["id"], admin_lang),
             )
         except Exception:
-            continue
+            logger.warning("Failed to notify admin %s about new client", admin_id)
 
 
 @router.message(F.text)
@@ -354,7 +355,7 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext) -> None:
                     lines.append(f"• {product['name']} - {qty}")
             await callback.bot.send_message(admin_id, "\n".join(lines))
         except Exception:
-            continue
+            logger.warning("Failed to notify admin %s about order", admin_id)
 
 
 @router.callback_query(F.data == "order:edit")

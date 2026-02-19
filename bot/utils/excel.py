@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-
 from bot.config import BASE_DIR
 
 
@@ -17,6 +14,9 @@ async def generate_excel(
 
     Rows = clients, Columns = products, Cells = quantities.
     """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
     wb = Workbook()
     ws = wb.active
     ws.title = f"Sesion {session_id}"

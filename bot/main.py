@@ -1,4 +1,4 @@
-"""MiniMelts Order Bot — entry point."""
+"""MiniMelts Order Bot entry point."""
 from __future__ import annotations
 
 import asyncio
@@ -6,13 +6,14 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
 from bot.config import config
-from bot.db import init_db, get_active_products
-from bot.seed import seed as seed_catalog
-from bot.handlers.client import router as client_router
+from bot.db import get_active_products, init_db
 from bot.handlers.admin import router as admin_router
+from bot.handlers.client import router as client_router
 from bot.scheduler import setup_scheduler
+from bot.seed import seed as seed_catalog
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,20 +30,26 @@ async def main() -> None:
     await init_db()
     logger.info("Database initialized")
 
-    # Auto-seed catalog on first run
     existing = await get_active_products()
     if not existing:
         await seed_catalog()
-        logger.info("Catalog seeded with MiniMelts products")
+        logger.info("Catalog seeded with default products")
 
     bot = Bot(token=config.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Register routers — admin first so admin commands take priority
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Start"),
+            BotCommand(command="menu", description="Main menu"),
+            BotCommand(command="lang", description="Switch language"),
+            BotCommand(command="mode", description="Switch role view"),
+        ]
+    )
+
     dp.include_router(admin_router)
     dp.include_router(client_router)
 
-    # Start scheduler if configured
     scheduler = setup_scheduler(bot)
     if scheduler:
         scheduler.start()

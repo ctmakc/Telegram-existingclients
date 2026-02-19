@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-from aiogram import Router, F
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from bot import db
 from bot.config import config
-from bot.keyboards import (
-    admin_main_kb,
-    catalog_kb,
-    client_list_kb,
-    client_actions_kb,
-)
+from bot.keyboards import admin_main_kb, catalog_kb, client_actions_kb, client_list_kb
+from bot.locales import action_labels, normalize_lang, status_text, t
 from bot.utils.excel import generate_excel
 
 router = Router()
@@ -22,21 +18,29 @@ class AddProduct(StatesGroup):
     name = State()
 
 
-# ==================== Admin filter ====================
+async def _is_admin_view(user_id: int) -> bool:
+    if config.is_admin(user_id):
+        return True
+    return (await db.get_user_mode(user_id)) == "admin"
 
-def _is_admin(message: Message) -> bool:
-    return config.is_admin(message.from_user.id)
+
+async def _admin_guard(message: Message) -> tuple[bool, str]:
+    lang = await db.get_user_language(message.from_user.id)
+    if not await _is_admin_view(message.from_user.id):
+        await message.answer(t(lang, "admin_only_mode"))
+        return False, lang
+    return True, lang
 
 
-# ==================== Open / Close orders ====================
-
-@router.message(F.text == "Abrir pedidos")
+@router.message(F.text.in_(action_labels("open_orders")))
 async def open_orders(message: Message) -> None:
-    if not _is_admin(message):
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
         return
+
     session = await db.get_active_session()
     if session:
-        await message.answer("Ya hay una sesion abierta. Cierra la actual primero.")
+        await message.answer(t(lang, "session_exists"))
         return
 
     session_id = await db.open_session()
@@ -45,60 +49,54 @@ async def open_orders(message: Message) -> None:
     sent = 0
     for client in clients:
         try:
-            await message.bot.send_message(
-                client["telegram_id"],
-                "Pedidos abiertos! Haz tu pedido ahora.",
-            )
+            client_lang = await db.get_user_language(client["telegram_id"])
+            await message.bot.send_message(client["telegram_id"], t(client_lang, "admin_open_notice"))
             sent += 1
         except Exception:
-            pass
+            continue
 
     await message.answer(
-        f"Sesion #{session_id} abierta. Notificados: {sent}/{len(clients)} clientes.",
-        reply_markup=admin_main_kb(),
+        t(lang, "session_opened", id=session_id, sent=sent, total=len(clients)),
+        reply_markup=admin_main_kb(lang),
     )
 
 
-@router.message(F.text == "Cerrar pedidos")
+@router.message(F.text.in_(action_labels("close_orders")))
 async def close_orders(message: Message) -> None:
-    if not _is_admin(message):
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
         return
+
     session = await db.get_active_session()
     if not session:
-        await message.answer("No hay sesion abierta.")
+        await message.answer(t(lang, "no_open_session"))
         return
 
     await db.close_session()
     count = await db.count_session_orders(session["id"])
     total_clients = len(await db.get_approved_clients())
     await message.answer(
-        f"Sesion cerrada. Pedidos recibidos: {count}/{total_clients}.",
-        reply_markup=admin_main_kb(),
+        t(lang, "session_closed", count=count, total=total_clients),
+        reply_markup=admin_main_kb(lang),
     )
 
 
-# ==================== Summary ====================
-
-@router.message(F.text == "Resumen")
+@router.message(F.text.in_(action_labels("summary")))
 async def summary(message: Message) -> None:
-    if not _is_admin(message):
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
         return
-    session = await db.get_active_session()
-    if not session:
-        # Show summary for last closed session
-        pass
 
-    # Try active session, or find the most recent
+    session = await db.get_active_session()
     if session:
         session_id = session["id"]
     else:
-        # Fallback: get the latest session
         _db = await db.get_db()
         try:
-            cur = await _db.execute("SELECT * FROM order_sessions ORDER BY id DESC LIMIT 1")
+            cur = await _db.execute("SELECT id FROM order_sessions ORDER BY id DESC LIMIT 1")
             row = await cur.fetchone()
             if not row:
-                await message.answer("No hay sesiones todavia.")
+                await message.answer(t(lang, "no_sessions"))
                 return
             session_id = row["id"]
         finally:
@@ -109,26 +107,23 @@ async def summary(message: Message) -> None:
     total_clients = len(await db.get_approved_clients())
 
     if not summary_data:
-        await message.answer(f"Sesion #{session_id}: sin pedidos todavia. ({count}/{total_clients} clientes)")
+        await message.answer(t(lang, "summary_empty", id=session_id, count=count, total=total_clients))
         return
 
-    lines = [f"Resumen sesion #{session_id}\n"]
-    lines.append(f"Pedidos: {count}/{total_clients} clientes\n")
-
+    lines = [f"📊 {t(lang, 'summary_title', id=session_id)}", t(lang, "summary_orders", count=count, total=total_clients), ""]
     grand_total = 0
     for item in summary_data:
-        lines.append(f"  {item['name']:.<30} {item['total']}")
+        lines.append(f"• {item['name']}: {item['total']}")
         grand_total += item["total"]
-
-    lines.append(f"\nTOTAL unidades: {grand_total}")
+    lines.append("")
+    lines.append(t(lang, "summary_grand", total=grand_total))
     await message.answer("\n".join(lines))
 
 
-# ==================== Excel export ====================
-
-@router.message(F.text == "Excel")
+@router.message(F.text.in_(action_labels("excel")))
 async def export_excel(message: Message) -> None:
-    if not _is_admin(message):
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
         return
 
     session = await db.get_active_session()
@@ -138,7 +133,7 @@ async def export_excel(message: Message) -> None:
             cur = await _db.execute("SELECT * FROM order_sessions ORDER BY id DESC LIMIT 1")
             row = await cur.fetchone()
             if not row:
-                await message.answer("No hay sesiones todavia.")
+                await message.answer(t(lang, "no_sessions"))
                 return
             session = dict(row)
         finally:
@@ -146,80 +141,100 @@ async def export_excel(message: Message) -> None:
 
     orders = await db.get_session_orders(session["id"])
     products = await db.get_active_products()
-
     if not orders:
-        await message.answer("No hay pedidos en esta sesion.")
+        await message.answer(t(lang, "excel_no_orders"))
         return
 
-    file_path = await generate_excel(orders, products, session["id"])
-    from aiogram.types import FSInputFile
+    try:
+        file_path = await generate_excel(orders, products, session["id"])
+    except ModuleNotFoundError:
+        await message.answer("openpyxl not installed. Run: pip install -r requirements.txt")
+        return
     await message.answer_document(FSInputFile(str(file_path), filename=file_path.name))
 
 
-# ==================== Catalog management ====================
-
-@router.message(F.text == "Catalogo")
+@router.message(F.text.in_(action_labels("catalog")))
 async def show_catalog(message: Message) -> None:
-    if not _is_admin(message):
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
         return
+
     products = await db.get_active_products()
     if not products:
-        await message.answer("Catalogo vacio.")
-    await message.answer("Catalogo actual:", reply_markup=catalog_kb(products))
+        await message.answer(t(lang, "catalog_empty"), reply_markup=catalog_kb([], lang))
+        return
+
+    await message.answer(t(lang, "catalog_title"), reply_markup=catalog_kb(products, lang))
 
 
 @router.callback_query(F.data == "catalog:add")
 async def catalog_add_start(callback: CallbackQuery, state: FSMContext) -> None:
-    if not config.is_admin(callback.from_user.id):
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
         return
+    lang = await db.get_user_language(callback.from_user.id)
     await callback.answer()
-    await callback.message.answer("Escribe el nombre del nuevo producto:")
+    await callback.message.answer(t(lang, "product_prompt"))
     await state.set_state(AddProduct.name)
 
 
 @router.message(AddProduct.name)
 async def catalog_add_finish(message: Message, state: FSMContext) -> None:
-    name = message.text.strip()
-    if not name:
-        await message.answer("Nombre no puede estar vacio.")
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
         return
+
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer(t(lang, "name_empty"))
+        return
+
     await db.add_product(name)
     await state.clear()
     products = await db.get_active_products()
-    await message.answer(f"Producto '{name}' anadido.", reply_markup=catalog_kb(products))
+    await message.answer(t(lang, "product_added", name=name), reply_markup=catalog_kb(products, lang))
 
 
 @router.callback_query(F.data.startswith("catalog:del:"))
 async def catalog_delete(callback: CallbackQuery) -> None:
-    if not config.is_admin(callback.from_user.id):
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
         return
+
     product_id = int(callback.data.split(":")[2])
     await db.delete_product(product_id)
+    lang = await db.get_user_language(callback.from_user.id)
     products = await db.get_active_products()
-    await callback.answer("Eliminado")
-    await callback.message.edit_reply_markup(reply_markup=catalog_kb(products))
+    await callback.answer("OK")
+    await callback.message.edit_reply_markup(reply_markup=catalog_kb(products, lang))
 
 
 @router.callback_query(F.data.startswith("catalog:up:"))
 async def catalog_move_up(callback: CallbackQuery) -> None:
-    if not config.is_admin(callback.from_user.id):
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
         return
+
     product_id = int(callback.data.split(":")[2])
     await db.move_product(product_id, "up")
+    lang = await db.get_user_language(callback.from_user.id)
     products = await db.get_active_products()
-    await callback.answer()
-    await callback.message.edit_reply_markup(reply_markup=catalog_kb(products))
+    await callback.answer("OK")
+    await callback.message.edit_reply_markup(reply_markup=catalog_kb(products, lang))
 
 
 @router.callback_query(F.data.startswith("catalog:down:"))
 async def catalog_move_down(callback: CallbackQuery) -> None:
-    if not config.is_admin(callback.from_user.id):
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
         return
+
     product_id = int(callback.data.split(":")[2])
     await db.move_product(product_id, "down")
+    lang = await db.get_user_language(callback.from_user.id)
     products = await db.get_active_products()
-    await callback.answer()
-    await callback.message.edit_reply_markup(reply_markup=catalog_kb(products))
+    await callback.answer("OK")
+    await callback.message.edit_reply_markup(reply_markup=catalog_kb(products, lang))
 
 
 @router.callback_query(F.data.startswith("catalog:noop:"))
@@ -227,67 +242,84 @@ async def catalog_noop(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-# ==================== Client management ====================
-
-@router.message(F.text == "Clientes")
+@router.message(F.text.in_(action_labels("clients")))
 async def show_clients(message: Message) -> None:
-    if not _is_admin(message):
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
         return
+
     clients = await db.get_all_clients()
     if not clients:
-        await message.answer("No hay clientes registrados.")
+        await message.answer(t(lang, "clients_empty"))
         return
-    await message.answer("Clientes:", reply_markup=client_list_kb(clients))
+
+    await message.answer(t(lang, "clients_title"), reply_markup=client_list_kb(clients, lang))
 
 
 @router.callback_query(F.data.startswith("client:info:"))
 async def client_info(callback: CallbackQuery) -> None:
-    if not config.is_admin(callback.from_user.id):
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
         return
-    client_id = int(callback.data.split(":")[2])
 
+    client_id = int(callback.data.split(":")[2])
     _db = await db.get_db()
     try:
         cur = await _db.execute("SELECT * FROM clients WHERE id = ?", (client_id,))
-        client = dict(await cur.fetchone())
+        row = await cur.fetchone()
+        if not row:
+            await callback.answer()
+            return
+        client = dict(row)
     finally:
         await _db.close()
 
-    status_text = {"approved": "Aprobado", "pending": "Pendiente", "blocked": "Bloqueado"}.get(client["status"], client["status"])
-    text = (
-        f"Nombre: {client['name']}\n"
-        f"Empresa: {client.get('company') or '-'}\n"
-        f"Estado: {status_text}\n"
-        f"Registrado: {client['created_at'][:16]}"
+    lang = await db.get_user_language(callback.from_user.id)
+    text = "\n".join(
+        [
+            f"👤 {client['name']}",
+            t(lang, "client_company", company=client.get("company") or "-"),
+            t(lang, "client_status", status=status_text(lang, client["status"])),
+            t(lang, "registered_at", date=client["created_at"][:16]),
+        ]
     )
     await callback.answer()
-    await callback.message.answer(text, reply_markup=client_actions_kb(client_id, client["status"]))
+    await callback.message.answer(text, reply_markup=client_actions_kb(client_id, client["status"], lang))
 
 
 @router.callback_query(F.data.startswith("client:approve:"))
 async def approve_client(callback: CallbackQuery) -> None:
-    if not config.is_admin(callback.from_user.id):
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
         return
+
     client_id = int(callback.data.split(":")[2])
     await db.approve_client(client_id)
 
     _db = await db.get_db()
     try:
         cur = await _db.execute("SELECT * FROM clients WHERE id = ?", (client_id,))
-        client = dict(await cur.fetchone())
+        row = await cur.fetchone()
+        if not row:
+            await callback.answer()
+            return
+        client = dict(row)
     finally:
         await _db.close()
 
-    await callback.answer("Aprobado!")
-    await callback.message.edit_text(f"Cliente {client['name']} aprobado.")
+    lang = await db.get_user_language(callback.from_user.id)
+    await callback.answer("OK")
+    await callback.message.edit_text(t(lang, "client_approved", name=client["name"]))
 
-    # Notify client
     try:
-        from bot.keyboards import client_main_kb
+        client_lang = await db.get_user_language(client["telegram_id"])
+        from bot.keyboards import menu_kb
+
+        mode = await db.get_user_mode(client["telegram_id"])
         await callback.bot.send_message(
             client["telegram_id"],
-            "Tu cuenta ha sido aprobada! Ya puedes hacer pedidos.",
-            reply_markup=client_main_kb(),
+            t(client_lang, "client_approved", name=client["name"]),
+            reply_markup=menu_kb(client_lang, mode),
         )
     except Exception:
         pass
@@ -295,39 +327,40 @@ async def approve_client(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("client:block:"))
 async def block_client(callback: CallbackQuery) -> None:
-    if not config.is_admin(callback.from_user.id):
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
         return
+
     client_id = int(callback.data.split(":")[2])
     await db.block_client(client_id)
-    await callback.answer("Bloqueado")
-    await callback.message.edit_text("Cliente bloqueado.")
+    lang = await db.get_user_language(callback.from_user.id)
+    await callback.answer("OK")
+    await callback.message.edit_text(t(lang, "client_blocked"))
 
 
-# ==================== Reminder ====================
-
-@router.message(F.text == "Recordar")
+@router.message(F.text.in_(action_labels("remind")))
 async def remind_clients(message: Message) -> None:
-    if not _is_admin(message):
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
         return
+
     session = await db.get_active_session()
     if not session:
-        await message.answer("No hay sesion abierta.")
+        await message.answer(t(lang, "no_open_session"))
         return
 
     clients = await db.get_clients_without_order(session["id"])
     if not clients:
-        await message.answer("Todos los clientes ya hicieron su pedido!")
+        await message.answer(t(lang, "remind_all_done"))
         return
 
     sent = 0
     for client in clients:
         try:
-            await message.bot.send_message(
-                client["telegram_id"],
-                "Recordatorio: los pedidos estan abiertos. No olvides hacer tu pedido!",
-            )
+            client_lang = await db.get_user_language(client["telegram_id"])
+            await message.bot.send_message(client["telegram_id"], t(client_lang, "admin_remind_notice"))
             sent += 1
         except Exception:
-            pass
+            continue
 
-    await message.answer(f"Recordatorio enviado a {sent}/{len(clients)} clientes sin pedido.")
+    await message.answer(t(lang, "remind_sent", sent=sent, total=len(clients)))

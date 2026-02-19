@@ -2,8 +2,8 @@ version: "3.8"
 
 services:
   bot:
-    # ---- ЗАМЕНИ на свой GitHub username/repo ----
-    image: ghcr.io/YOUR_GITHUB_USERNAME/telegram-existingclients:latest
+    build: .
+    image: ghcr.io/${GITHUB_REPOSITORY:-YOUR_GITHUB_USERNAME/telegram-existingclients}:latest
     container_name: minimelts-bot
     restart: unless-stopped
     env_file:
@@ -23,7 +23,6 @@ services:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_POLL_INTERVAL=300
       - WATCHTOWER_LABEL_ENABLE=true
-    # Watchtower каждые 5 мин проверяет новый образ в GHCR
 
 volumes:
   bot-data:

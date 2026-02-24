@@ -33,6 +33,7 @@ class Config:
     db_path: Path
     catalog_source_url: str
     bot_version: str
+    image_tag: str
 
     def is_admin(self, user_id: int | None) -> bool:
         return bool(user_id) and user_id in self.admin_ids
@@ -99,6 +100,7 @@ def _build_config() -> Config:
             or "https://minimelts.es/sabores/"
         ),
         bot_version=(os.getenv("BOT_VERSION", "dev").strip() or "dev"),
+        image_tag=(os.getenv("IMAGE_TAG", "latest").strip() or "latest"),
     )
 
 

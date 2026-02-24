@@ -3,7 +3,7 @@ version: "3.8"
 services:
   bot:
     build: .
-    image: ghcr.io/${GITHUB_REPOSITORY:-YOUR_GITHUB_USERNAME/telegram-existingclients}:latest
+    image: ghcr.io/${GITHUB_REPOSITORY:-YOUR_GITHUB_USERNAME/telegram-existingclients}:${IMAGE_TAG:-latest}
     container_name: minimelts-bot
     restart: unless-stopped
     env_file:

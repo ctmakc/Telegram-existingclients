@@ -33,6 +33,10 @@ class OrderFlow(StatesGroup):
     entering_quantity = State()
 
 
+def _version_text() -> str:
+    return f"v{config.bot_version} (image:{config.image_tag})"
+
+
 def _user_id(message_or_callback: Message | CallbackQuery) -> int:
     if isinstance(message_or_callback, CallbackQuery):
         return message_or_callback.from_user.id
@@ -56,7 +60,7 @@ async def _show_menu(target: Message | CallbackQuery) -> None:
     user_id = _user_id(target)
     lang, mode = await _lang_mode(user_id)
     title = t(lang, "menu_admin") if mode == "admin" else t(lang, "menu_client")
-    text = f"✨ {title}\nv{config.bot_version}"
+    text = f"✨ {title}\n{_version_text()}"
 
     if isinstance(target, CallbackQuery):
         await target.message.answer(text, reply_markup=menu_kb(lang, mode))
@@ -72,7 +76,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     client = await db.get_client_by_tg(message.from_user.id)
     if client:
         await message.answer(
-            t(lang, "welcome", name=client["name"]),
+            f"{t(lang, 'welcome', name=client['name'])}\n{_version_text()}",
             reply_markup=menu_kb(lang, mode),
         )
         return
@@ -105,7 +109,7 @@ async def cmd_mode(message: Message) -> None:
 
 @router.message(Command("version"))
 async def cmd_version(message: Message) -> None:
-    await message.answer(f"Version: {config.bot_version}")
+    await message.answer(f"Version: {_version_text()}")
 
 
 @router.callback_query(F.data.startswith("lang:"))

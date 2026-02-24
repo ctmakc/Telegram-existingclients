@@ -26,7 +26,7 @@ async def main() -> None:
     if not config.bot_token:
         logger.error("BOT_TOKEN is not set! Copy .env.example to .env and fill in your token.")
         return
-    logger.info("Bot version: %s", config.bot_version)
+    logger.info("Bot version: %s (image tag: %s)", config.bot_version, config.image_tag)
 
     await init_db()
     logger.info("Database initialized")

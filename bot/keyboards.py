@@ -23,7 +23,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
             [KeyboardButton(text=b(lang, "open_orders")), KeyboardButton(text=b(lang, "close_orders"))],
             [KeyboardButton(text=b(lang, "summary")), KeyboardButton(text=b(lang, "excel"))],
             [KeyboardButton(text=b(lang, "catalog")), KeyboardButton(text=b(lang, "catalog_sync"))],
-            [KeyboardButton(text=b(lang, "clients"))],
+            [KeyboardButton(text=b(lang, "clients")), KeyboardButton(text=b(lang, "groups"))],
             [KeyboardButton(text=b(lang, "remind"))],
             [KeyboardButton(text=b(lang, "switch_mode")), KeyboardButton(text=b(lang, "switch_lang"))],
         ],
@@ -82,6 +82,8 @@ def client_list_kb(clients: list[dict], lang: str) -> InlineKeyboardMarkup:
         label = f"{icon} {client['name']}"
         if client.get("company"):
             label += f" ({client['company']})"
+        if client.get("group_name"):
+            label += f" [{client['group_name']}]"
         label += f" · {status_text(lang, client['status'])}"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"client:info:{client['id']}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -97,6 +99,12 @@ def client_actions_kb(client_id: int, status: str, lang: str) -> InlineKeyboardM
         buttons.append(InlineKeyboardButton(text=approve, callback_data=f"client:approve:{client_id}"))
     if status != "blocked":
         buttons.append(InlineKeyboardButton(text=block, callback_data=f"client:block:{client_id}"))
+    buttons.append(
+        InlineKeyboardButton(
+            text=("🗂 Группа" if lang == "ru" else "🗂 Grupo"),
+            callback_data=f"client:groupmenu:{client_id}",
+        )
+    )
 
     return InlineKeyboardMarkup(inline_keyboard=[buttons] if buttons else [])
 
@@ -142,3 +150,57 @@ def mode_kb(lang: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def groups_kb(groups: list[dict], lang: str) -> InlineKeyboardMarkup:
+    ru = normalize_lang(lang) == "ru"
+    rows: list[list[InlineKeyboardButton]] = []
+    for g in groups:
+        label = f"🗂 {g['name']} ({g.get('approved_total', 0)}/{g.get('clients_total', 0)})"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"group:view:{g['id']}")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=("➕ Добавить группу" if ru else "➕ Anadir grupo"),
+                callback_data="group:add",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def group_actions_kb(group_id: int, lang: str) -> InlineKeyboardMarkup:
+    ru = normalize_lang(lang) == "ru"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=("🔔 Напомнить группе" if ru else "🔔 Recordar grupo"),
+                    callback_data=f"group:remind:{group_id}",
+                )
+            ]
+        ]
+    )
+
+
+def client_group_assign_kb(client_id: int, groups: list[dict], lang: str) -> InlineKeyboardMarkup:
+    ru = normalize_lang(lang) == "ru"
+    rows: list[list[InlineKeyboardButton]] = []
+    for g in groups:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🗂 {g['name']}",
+                    callback_data=f"client:setgroup:{client_id}:{g['id']}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=("🚫 Без группы" if ru else "🚫 Sin grupo"),
+                callback_data=f"client:setgroup:{client_id}:0",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)

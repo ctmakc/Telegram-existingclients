@@ -10,7 +10,15 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from bot import db
 from bot.config import config
-from bot.keyboards import admin_main_kb, catalog_kb, client_actions_kb, client_list_kb
+from bot.keyboards import (
+    admin_main_kb,
+    catalog_kb,
+    client_actions_kb,
+    client_group_assign_kb,
+    client_list_kb,
+    group_actions_kb,
+    groups_kb,
+)
 from bot.locales import action_labels, status_text, t
 from bot.utils.catalog_scraper import fetch_flavors_async
 from bot.utils.excel import generate_excel
@@ -20,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 class AddProduct(StatesGroup):
+    name = State()
+
+
+class AddGroup(StatesGroup):
     name = State()
 
 
@@ -35,6 +47,26 @@ async def _admin_guard(message: Message) -> tuple[bool, str]:
         await message.answer(t(lang, "admin_only_mode"))
         return False, lang
     return True, lang
+
+
+async def _send_group_reminder(bot, group_id: int) -> tuple[int, int, str]:
+    group = await db.get_client_group(group_id)
+    if not group:
+        return 0, 0, ""
+    session = await db.get_active_session()
+    if not session:
+        return -1, -1, group["name"]
+
+    clients = await db.get_clients_without_order(session["id"], group_id=group_id)
+    sent = 0
+    for client in clients:
+        try:
+            client_lang = await db.get_user_language(client["telegram_id"])
+            await bot.send_message(client["telegram_id"], t(client_lang, "admin_remind_notice"))
+            sent += 1
+        except Exception:
+            logger.warning("Failed to send group reminder to %s", client["telegram_id"])
+    return sent, len(clients), group["name"]
 
 
 @router.message(F.text.in_(action_labels("open_orders")))
@@ -280,6 +312,108 @@ async def catalog_noop(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.message(F.text.in_(action_labels("groups")))
+async def show_groups(message: Message) -> None:
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
+        return
+
+    groups = await db.get_client_groups()
+    if not groups:
+        await message.answer(t(lang, "groups_empty"), reply_markup=groups_kb([], lang))
+        return
+    await message.answer(t(lang, "groups_title"), reply_markup=groups_kb(groups, lang))
+
+
+@router.callback_query(F.data == "group:add")
+async def group_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
+        return
+    lang = await db.get_user_language(callback.from_user.id)
+    await callback.answer()
+    await callback.message.answer(t(lang, "group_prompt"))
+    await state.set_state(AddGroup.name)
+
+
+@router.message(AddGroup.name)
+async def group_add_finish(message: Message, state: FSMContext) -> None:
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
+        return
+
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer(t(lang, "group_name_empty"))
+        return
+
+    try:
+        await db.add_client_group(name)
+    except Exception as exc:
+        await state.clear()
+        groups = await db.get_client_groups()
+        if "UNIQUE" in str(exc).upper():
+            await message.answer(t(lang, "group_exists"), reply_markup=groups_kb(groups, lang))
+            return
+        logger.exception("Failed to add client group")
+        await message.answer(t(lang, "group_add_failed"), reply_markup=groups_kb(groups, lang))
+        return
+
+    await state.clear()
+    groups = await db.get_client_groups()
+    await message.answer(t(lang, "group_added", name=name), reply_markup=groups_kb(groups, lang))
+
+
+@router.callback_query(F.data.startswith("group:view:"))
+async def group_view(callback: CallbackQuery) -> None:
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
+        return
+    group_id = int(callback.data.split(":")[2])
+    group = await db.get_client_group(group_id)
+    if not group:
+        await callback.answer()
+        return
+
+    session = await db.get_active_session()
+    without_order = 0
+    if session:
+        without_order = len(await db.get_clients_without_order(session["id"], group_id=group_id))
+
+    lang = await db.get_user_language(callback.from_user.id)
+    await callback.answer()
+    await callback.message.answer(
+        t(
+            lang,
+            "group_details",
+            name=group["name"],
+            clients_total=group.get("clients_total", 0),
+            approved_total=group.get("approved_total", 0),
+            without_order=without_order,
+        ),
+        reply_markup=group_actions_kb(group_id, lang),
+    )
+
+
+@router.callback_query(F.data.startswith("group:remind:"))
+async def group_remind(callback: CallbackQuery) -> None:
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
+        return
+    group_id = int(callback.data.split(":")[2])
+    lang = await db.get_user_language(callback.from_user.id)
+    sent, total, _group_name = await _send_group_reminder(callback.bot, group_id)
+    if sent == -1 and total == -1:
+        await callback.answer()
+        await callback.message.answer(t(lang, "group_no_open_session"))
+        return
+    await callback.answer("OK")
+    if total == 0:
+        await callback.message.answer(t(lang, "group_remind_none"))
+        return
+    await callback.message.answer(t(lang, "group_remind_sent", sent=sent, total=total))
+
+
 @router.message(F.text.in_(action_labels("clients")))
 async def show_clients(message: Message) -> None:
     allowed, lang = await _admin_guard(message)
@@ -303,7 +437,15 @@ async def client_info(callback: CallbackQuery) -> None:
     client_id = int(callback.data.split(":")[2])
     _db = await db.get_db()
     try:
-        cur = await _db.execute("SELECT * FROM clients WHERE id = ?", (client_id,))
+        cur = await _db.execute(
+            """
+            SELECT c.*, g.name AS group_name
+            FROM clients c
+            LEFT JOIN client_groups g ON g.id = c.group_id
+            WHERE c.id = ?
+            """,
+            (client_id,),
+        )
         row = await cur.fetchone()
         if not row:
             await callback.answer()
@@ -317,12 +459,42 @@ async def client_info(callback: CallbackQuery) -> None:
         [
             f"👤 {client['name']}",
             t(lang, "client_company", company=client.get("company") or "-"),
+            t(lang, "client_group", group=client.get("group_name") or "-"),
             t(lang, "client_status", status=status_text(lang, client["status"])),
             t(lang, "registered_at", date=client["created_at"][:16]),
         ]
     )
     await callback.answer()
     await callback.message.answer(text, reply_markup=client_actions_kb(client_id, client["status"], lang))
+
+
+@router.callback_query(F.data.startswith("client:groupmenu:"))
+async def client_group_menu(callback: CallbackQuery) -> None:
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
+        return
+    client_id = int(callback.data.split(":")[2])
+    groups = await db.get_client_groups()
+    lang = await db.get_user_language(callback.from_user.id)
+    await callback.answer()
+    await callback.message.answer(
+        t(lang, "choose_group_for_client"),
+        reply_markup=client_group_assign_kb(client_id, groups, lang),
+    )
+
+
+@router.callback_query(F.data.startswith("client:setgroup:"))
+async def client_set_group(callback: CallbackQuery) -> None:
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
+        return
+    _, _, client_id_s, group_id_s = callback.data.split(":", 3)
+    client_id = int(client_id_s)
+    group_id = int(group_id_s)
+    await db.set_client_group(client_id, None if group_id == 0 else group_id)
+    lang = await db.get_user_language(callback.from_user.id)
+    await callback.answer("OK")
+    await callback.message.answer(t(lang, "client_group_set"))
 
 
 @router.callback_query(F.data.startswith("client:approve:"))

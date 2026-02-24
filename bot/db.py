@@ -27,7 +27,16 @@ async def init_db() -> None:
                 name TEXT NOT NULL,
                 company TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
+                group_id INTEGER,
                 language TEXT NOT NULL DEFAULT 'ru',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (group_id) REFERENCES client_groups(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS client_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                note TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -79,6 +88,8 @@ async def init_db() -> None:
         cols = [r["name"] for r in await cur.fetchall()]
         if cols and "language" not in cols:
             await db.execute("ALTER TABLE clients ADD COLUMN language TEXT NOT NULL DEFAULT 'ru'")
+        if cols and "group_id" not in cols:
+            await db.execute("ALTER TABLE clients ADD COLUMN group_id INTEGER")
 
         cur = await db.execute("PRAGMA table_info(order_sessions)")
         cols = [r["name"] for r in await cur.fetchall()]
@@ -200,7 +211,14 @@ async def get_client_by_tg(telegram_id: int) -> dict | None:
 async def get_all_clients() -> list[dict]:
     db = await get_db()
     try:
-        cur = await db.execute("SELECT * FROM clients ORDER BY created_at DESC")
+        cur = await db.execute(
+            """
+            SELECT c.*, g.name AS group_name
+            FROM clients c
+            LEFT JOIN client_groups g ON g.id = c.group_id
+            ORDER BY c.created_at DESC
+            """
+        )
         return [dict(r) for r in await cur.fetchall()]
     finally:
         await db.close()
@@ -227,8 +245,95 @@ async def block_client(client_id: int) -> None:
 async def get_approved_clients() -> list[dict]:
     db = await get_db()
     try:
-        cur = await db.execute("SELECT * FROM clients WHERE status = 'approved' ORDER BY id")
+        cur = await db.execute(
+            """
+            SELECT c.*, g.name AS group_name
+            FROM clients c
+            LEFT JOIN client_groups g ON g.id = c.group_id
+            WHERE c.status = 'approved'
+            ORDER BY c.id
+            """
+        )
         return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def get_client_groups() -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """
+            SELECT g.*,
+                   (SELECT COUNT(*) FROM clients c WHERE c.group_id = g.id) AS clients_total,
+                   (SELECT COUNT(*) FROM clients c WHERE c.group_id = g.id AND c.status = 'approved') AS approved_total
+            FROM client_groups g
+            ORDER BY g.name COLLATE NOCASE, g.id
+            """
+        )
+        return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def add_client_group(name: str, note: str | None = None) -> int:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT INTO client_groups (name, note) VALUES (?, ?)",
+            (name.strip(), note.strip() if note else None),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+    finally:
+        await db.close()
+
+
+async def get_client_group(group_id: int) -> dict | None:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """
+            SELECT g.*,
+                   (SELECT COUNT(*) FROM clients c WHERE c.group_id = g.id) AS clients_total,
+                   (SELECT COUNT(*) FROM clients c WHERE c.group_id = g.id AND c.status = 'approved') AS approved_total
+            FROM client_groups g
+            WHERE g.id = ?
+            """,
+            (group_id,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def get_group_clients(group_id: int) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """
+            SELECT c.*, g.name AS group_name
+            FROM clients c
+            LEFT JOIN client_groups g ON g.id = c.group_id
+            WHERE c.group_id = ?
+            ORDER BY c.name COLLATE NOCASE, c.id
+            """,
+            (group_id,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def set_client_group(client_id: int, group_id: int | None) -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE clients SET group_id = ? WHERE id = ?",
+            (group_id, client_id),
+        )
+        await db.commit()
     finally:
         await db.close()
 
@@ -544,23 +649,42 @@ async def get_session_summary(session_id: int) -> list[dict]:
         await db.close()
 
 
-async def get_clients_without_order(session_id: int) -> list[dict]:
+async def get_clients_without_order(session_id: int, group_id: int | None = None) -> list[dict]:
     db = await get_db()
     try:
-        cur = await db.execute(
-            """
-            SELECT c.*
-            FROM clients c
-            WHERE c.status = 'approved'
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM orders o
-                  WHERE o.client_id = c.id AND o.session_id = ?
-              )
-            ORDER BY c.id
-            """,
-            (session_id,),
-        )
+        if group_id is None:
+            cur = await db.execute(
+                """
+                SELECT c.*, g.name AS group_name
+                FROM clients c
+                LEFT JOIN client_groups g ON g.id = c.group_id
+                WHERE c.status = 'approved'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM orders o
+                      WHERE o.client_id = c.id AND o.session_id = ?
+                  )
+                ORDER BY c.id
+                """,
+                (session_id,),
+            )
+        else:
+            cur = await db.execute(
+                """
+                SELECT c.*, g.name AS group_name
+                FROM clients c
+                LEFT JOIN client_groups g ON g.id = c.group_id
+                WHERE c.status = 'approved'
+                  AND c.group_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM orders o
+                      WHERE o.client_id = c.id AND o.session_id = ?
+                  )
+                ORDER BY c.id
+                """,
+                (group_id, session_id),
+            )
         return [dict(r) for r in await cur.fetchall()]
     finally:
         await db.close()

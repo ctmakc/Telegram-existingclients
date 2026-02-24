@@ -26,6 +26,7 @@ async def main() -> None:
     if not config.bot_token:
         logger.error("BOT_TOKEN is not set! Copy .env.example to .env and fill in your token.")
         return
+    logger.info("Bot version: %s", config.bot_version)
 
     await init_db()
     logger.info("Database initialized")
@@ -44,6 +45,7 @@ async def main() -> None:
             BotCommand(command="menu", description="Main menu"),
             BotCommand(command="lang", description="Switch language"),
             BotCommand(command="mode", description="Switch role view"),
+            BotCommand(command="version", description="Show bot version"),
             BotCommand(command="sync_catalog", description="Admin: sync catalog from site"),
         ]
     )

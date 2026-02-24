@@ -56,11 +56,12 @@ async def _show_menu(target: Message | CallbackQuery) -> None:
     user_id = _user_id(target)
     lang, mode = await _lang_mode(user_id)
     title = t(lang, "menu_admin") if mode == "admin" else t(lang, "menu_client")
+    text = f"✨ {title}\nv{config.bot_version}"
 
     if isinstance(target, CallbackQuery):
-        await target.message.answer(f"✨ {title}", reply_markup=menu_kb(lang, mode))
+        await target.message.answer(text, reply_markup=menu_kb(lang, mode))
     else:
-        await target.answer(f"✨ {title}", reply_markup=menu_kb(lang, mode))
+        await target.answer(text, reply_markup=menu_kb(lang, mode))
 
 
 @router.message(CommandStart())
@@ -100,6 +101,11 @@ async def cmd_lang(message: Message) -> None:
 async def cmd_mode(message: Message) -> None:
     lang = await db.get_user_language(message.from_user.id)
     await message.answer(t(lang, "choose_mode"), reply_markup=mode_kb(lang))
+
+
+@router.message(Command("version"))
+async def cmd_version(message: Message) -> None:
+    await message.answer(f"Version: {config.bot_version}")
 
 
 @router.callback_query(F.data.startswith("lang:"))

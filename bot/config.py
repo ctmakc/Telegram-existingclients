@@ -32,6 +32,7 @@ class Config:
     default_language: str
     db_path: Path
     catalog_source_url: str
+    bot_version: str
 
     def is_admin(self, user_id: int | None) -> bool:
         return bool(user_id) and user_id in self.admin_ids
@@ -97,6 +98,7 @@ def _build_config() -> Config:
             os.getenv("CATALOG_SOURCE_URL", "https://minimelts.es/sabores/").strip()
             or "https://minimelts.es/sabores/"
         ),
+        bot_version=(os.getenv("BOT_VERSION", "dev").strip() or "dev"),
     )
 
 

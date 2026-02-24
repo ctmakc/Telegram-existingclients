@@ -44,6 +44,7 @@ async def main() -> None:
             BotCommand(command="menu", description="Main menu"),
             BotCommand(command="lang", description="Switch language"),
             BotCommand(command="mode", description="Switch role view"),
+            BotCommand(command="sync_catalog", description="Admin: sync catalog from site"),
         ]
     )
 

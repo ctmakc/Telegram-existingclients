@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, Message
@@ -11,6 +12,7 @@ from bot import db
 from bot.config import config
 from bot.keyboards import admin_main_kb, catalog_kb, client_actions_kb, client_list_kb
 from bot.locales import action_labels, status_text, t
+from bot.utils.catalog_scraper import fetch_flavors_async
 from bot.utils.excel import generate_excel
 
 router = Router()
@@ -168,6 +170,39 @@ async def show_catalog(message: Message) -> None:
         return
 
     await message.answer(t(lang, "catalog_title"), reply_markup=catalog_kb(products, lang))
+
+
+@router.message(Command("sync_catalog"))
+@router.message(F.text.in_(action_labels("catalog_sync")))
+async def sync_catalog_from_site(message: Message) -> None:
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
+        return
+
+    await message.answer(t(lang, "catalog_sync_started"))
+    try:
+        names = await fetch_flavors_async(config.catalog_source_url)
+        if not names:
+            await message.answer(t(lang, "catalog_sync_empty"))
+            return
+
+        stats = await db.sync_products_catalog(names)
+        products = await db.get_active_products()
+        await message.answer(
+            t(
+                lang,
+                "catalog_sync_done",
+                total=stats["total_incoming"],
+                matched=stats["matched"],
+                added=stats["added"],
+                reactivated=stats["reactivated"],
+                kept_extra=stats["kept_extra"],
+            ),
+            reply_markup=catalog_kb(products, lang),
+        )
+    except Exception:
+        logger.exception("Failed to sync catalog from site")
+        await message.answer(t(lang, "catalog_sync_failed"))
 
 
 @router.callback_query(F.data == "catalog:add")

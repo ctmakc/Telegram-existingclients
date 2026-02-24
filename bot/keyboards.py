@@ -22,7 +22,8 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=b(lang, "open_orders")), KeyboardButton(text=b(lang, "close_orders"))],
             [KeyboardButton(text=b(lang, "summary")), KeyboardButton(text=b(lang, "excel"))],
-            [KeyboardButton(text=b(lang, "catalog")), KeyboardButton(text=b(lang, "clients"))],
+            [KeyboardButton(text=b(lang, "catalog")), KeyboardButton(text=b(lang, "catalog_sync"))],
+            [KeyboardButton(text=b(lang, "clients"))],
             [KeyboardButton(text=b(lang, "remind"))],
             [KeyboardButton(text=b(lang, "switch_mode")), KeyboardButton(text=b(lang, "switch_lang"))],
         ],

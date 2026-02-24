@@ -261,6 +261,104 @@ async def add_product(name: str) -> int:
         await db.close()
 
 
+def _product_key(name: str) -> str:
+    return " ".join((name or "").split()).strip().casefold()
+
+
+async def sync_products_catalog(names: list[str]) -> dict:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        name = " ".join((raw or "").split()).strip()
+        if not name:
+            continue
+        key = _product_key(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(name)
+
+    if not cleaned:
+        return {"total_incoming": 0, "matched": 0, "added": 0, "reactivated": 0, "kept_extra": 0}
+
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id, name, sort_order, is_active FROM products ORDER BY sort_order, id"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+
+        # Prefer active rows for matching; keep one candidate per normalized name.
+        active_by_key: dict[str, dict] = {}
+        inactive_by_key: dict[str, dict] = {}
+        for row in rows:
+            key = _product_key(row["name"])
+            if not key:
+                continue
+            if row["is_active"] and key not in active_by_key:
+                active_by_key[key] = row
+            elif not row["is_active"] and key not in inactive_by_key:
+                inactive_by_key[key] = row
+
+        used_ids: set[int] = set()
+        next_order = 1
+        added = 0
+        reactivated = 0
+        matched = 0
+
+        for name in cleaned:
+            key = _product_key(name)
+            row = active_by_key.get(key)
+            if row and row["id"] not in used_ids:
+                matched += 1
+                used_ids.add(int(row["id"]))
+                await db.execute(
+                    "UPDATE products SET name = ?, sort_order = ?, is_active = 1 WHERE id = ?",
+                    (name, next_order, row["id"]),
+                )
+                next_order += 1
+                continue
+
+            row = inactive_by_key.get(key)
+            if row and row["id"] not in used_ids:
+                reactivated += 1
+                used_ids.add(int(row["id"]))
+                await db.execute(
+                    "UPDATE products SET name = ?, sort_order = ?, is_active = 1 WHERE id = ?",
+                    (name, next_order, row["id"]),
+                )
+                next_order += 1
+                continue
+
+            cur = await db.execute(
+                "INSERT INTO products (name, sort_order, is_active) VALUES (?, ?, 1)",
+                (name, next_order),
+            )
+            used_ids.add(int(cur.lastrowid))
+            added += 1
+            next_order += 1
+
+        # Keep any other currently active products after the synced site catalog.
+        extra_active = [r for r in rows if r["is_active"] and int(r["id"]) not in used_ids]
+        for row in extra_active:
+            await db.execute(
+                "UPDATE products SET sort_order = ? WHERE id = ?",
+                (next_order, row["id"]),
+            )
+            next_order += 1
+
+        await db.commit()
+        return {
+            "total_incoming": len(cleaned),
+            "matched": matched,
+            "added": added,
+            "reactivated": reactivated,
+            "kept_extra": len(extra_active),
+        }
+    finally:
+        await db.close()
+
+
 async def delete_product(product_id: int) -> None:
     db = await get_db()
     try:

@@ -80,7 +80,7 @@ async def _auto_open(bot: Bot, open_entry: ScheduleEntry) -> None:
             except Exception:
                 logger.warning("Failed to notify client %s", client["telegram_id"])
 
-        for admin_id in config.admin_ids:
+        for admin_id in await db.get_admin_telegram_ids():
             try:
                 lang = await db.get_user_language(admin_id)
                 await bot.send_message(
@@ -132,7 +132,7 @@ async def _auto_close(bot: Bot) -> None:
         total_clients = len(await db.get_approved_clients())
         summary_data = await db.get_session_summary(session_id)
 
-        for admin_id in config.admin_ids:
+        for admin_id in await db.get_admin_telegram_ids():
             try:
                 lang = await db.get_user_language(admin_id)
                 lines = [

@@ -47,6 +47,7 @@ async def main() -> None:
             BotCommand(command="mode", description="Switch role view"),
             BotCommand(command="version", description="Show bot version"),
             BotCommand(command="sync_catalog", description="Admin: sync catalog from site"),
+            BotCommand(command="admins", description="Superadmin: manage admins"),
         ]
     )
 

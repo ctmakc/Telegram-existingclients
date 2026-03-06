@@ -3,20 +3,18 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot import db
 from bot.config import config
 from bot.keyboards import (
     approve_client_kb,
-    confirm_order_kb,
     language_kb,
     menu_kb,
     mode_kb,
-    skip_product_kb,
 )
 from bot.locales import action_match, normalize_lang, t
 
@@ -30,7 +28,7 @@ class Registration(StatesGroup):
 
 
 class OrderFlow(StatesGroup):
-    entering_quantity = State()
+    editing = State()
 
 
 def _version_text() -> str:
@@ -46,14 +44,19 @@ def _user_id(message_or_callback: Message | CallbackQuery) -> int:
 async def _lang_mode(user_id: int) -> tuple[str, str]:
     pref = await db.get_user_pref(user_id)
     lang = normalize_lang(pref.get("language"))
-    mode = pref.get("ui_mode") or "client"
+    mode = await _resolved_mode(user_id)
     return lang, mode
 
 
+async def _resolved_mode(user_id: int) -> str:
+    if not await db.is_admin_user(user_id):
+        return "client"
+    mode = await db.get_user_mode(user_id)
+    return "admin" if mode == "admin" else "client"
+
+
 async def _is_admin_view(user_id: int) -> bool:
-    if config.is_admin(user_id):
-        return True
-    return (await db.get_user_mode(user_id)) == "admin"
+    return await db.is_admin_user(user_id)
 
 
 async def _show_menu(target: Message | CallbackQuery) -> None:
@@ -81,7 +84,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         )
         return
 
-    if mode == "admin" or config.is_admin(message.from_user.id):
+    if mode == "admin":
         await _show_menu(message)
         return
 
@@ -104,7 +107,11 @@ async def cmd_lang(message: Message) -> None:
 @router.message(Command("mode"))
 async def cmd_mode(message: Message) -> None:
     lang = await db.get_user_language(message.from_user.id)
-    await message.answer(t(lang, "choose_mode"), reply_markup=mode_kb(lang))
+    can_admin = await db.is_admin_user(message.from_user.id)
+    await message.answer(
+        t(lang, "choose_mode"),
+        reply_markup=mode_kb(lang, allow_admin=can_admin),
+    )
 
 
 @router.message(Command("version"))
@@ -121,7 +128,8 @@ async def set_language(callback: CallbackQuery) -> None:
 
     await db.set_user_language(callback.from_user.id, lang)
     await callback.answer("OK")
-    await callback.message.answer(t(lang, "lang_changed"), reply_markup=menu_kb(lang, await db.get_user_mode(callback.from_user.id)))
+    mode = await _resolved_mode(callback.from_user.id)
+    await callback.message.answer(t(lang, "lang_changed"), reply_markup=menu_kb(lang, mode))
 
 
 @router.callback_query(F.data.startswith("mode:"))
@@ -131,8 +139,14 @@ async def set_mode(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
-    await db.set_user_mode(callback.from_user.id, mode)
     lang = await db.get_user_language(callback.from_user.id)
+    if mode == "admin" and not await db.is_admin_user(callback.from_user.id):
+        await db.set_user_mode(callback.from_user.id, "client")
+        await callback.answer()
+        await callback.message.answer(t(lang, "admin_only_mode"), reply_markup=menu_kb(lang, "client"))
+        return
+
+    await db.set_user_mode(callback.from_user.id, mode)
     msg_key = "mode_changed_admin" if mode == "admin" else "mode_changed_client"
     await callback.answer("OK")
     await callback.message.answer(t(lang, msg_key), reply_markup=menu_kb(lang, mode))
@@ -165,10 +179,11 @@ async def registration_company(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     lang = await db.get_user_language(message.from_user.id)
-    await message.answer(t(lang, "request_sent"), reply_markup=menu_kb(lang, await db.get_user_mode(message.from_user.id)))
+    mode = await _resolved_mode(message.from_user.id)
+    await message.answer(t(lang, "request_sent"), reply_markup=menu_kb(lang, mode))
 
     client = await db.get_client_by_tg(message.from_user.id)
-    for admin_id in config.admin_ids:
+    for admin_id in await db.get_admin_telegram_ids():
         try:
             admin_lang = await db.get_user_language(admin_id)
             await message.bot.send_message(
@@ -180,7 +195,7 @@ async def registration_company(message: Message, state: FSMContext) -> None:
             logger.warning("Failed to notify admin %s about new client", admin_id)
 
 
-@router.message(F.text)
+@router.message(StateFilter(None), F.text)
 async def text_router(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     lang, mode = await _lang_mode(message.from_user.id)
@@ -190,7 +205,11 @@ async def text_router(message: Message, state: FSMContext) -> None:
         return
 
     if action_match(text, "switch_mode"):
-        await message.answer(t(lang, "choose_mode"), reply_markup=mode_kb(lang))
+        can_admin = await db.is_admin_user(message.from_user.id)
+        await message.answer(
+            t(lang, "choose_mode"),
+            reply_markup=mode_kb(lang, allow_admin=can_admin),
+        )
         return
 
     if action_match(text, "home"):
@@ -233,81 +252,160 @@ async def new_order(message: Message, state: FSMContext) -> None:
         session_id=session["id"],
         client_id=client["id"],
         products=products,
-        current_idx=0,
-        order_items=[],
+        quantities=[0 for _ in products],
         lang=lang,
     )
-    await state.set_state(OrderFlow.entering_quantity)
-    await _ask_product_quantity(message, state)
+    await state.set_state(OrderFlow.editing)
+    await _render_order_editor(message, state)
 
 
-async def _ask_product_quantity(target: Message | CallbackQuery, state: FSMContext) -> None:
+def _short_name(name: str, limit: int = 18) -> str:
+    compact = " ".join((name or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1] + "…"
+
+
+def _order_editor_kb(products: list[dict], quantities: list[int], lang: str) -> InlineKeyboardMarkup:
+    ru = normalize_lang(lang) == "ru"
+    confirm_text = "✅ Подтвердить" if ru else "✅ Confirmar"
+    cancel_text = "✖ Отменить" if ru else "✖ Cancelar"
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, product in enumerate(products):
+        qty = quantities[idx] if idx < len(quantities) else 0
+        label = f"{_short_name(product['name'])} [{qty}]"
+        rows.append(
+            [
+                InlineKeyboardButton(text=label, callback_data="order:noop"),
+                InlineKeyboardButton(text="➕", callback_data=f"order:plus:{idx}"),
+                InlineKeyboardButton(text="➖", callback_data=f"order:minus:{idx}"),
+                InlineKeyboardButton(text="✖", callback_data=f"order:zero:{idx}"),
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(text=confirm_text, callback_data="order:confirm"),
+            InlineKeyboardButton(text=cancel_text, callback_data="order:cancel"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _order_editor_text(lang: str, products: list[dict], quantities: list[int]) -> str:
+    lines = [f"🧾 {t(lang, 'order_editor_title')}"]
+    total_units = 0
+    total_positions = 0
+
+    for product, qty in zip(products, quantities):
+        lines.append(f"• {product['name']} - {qty}")
+        if qty > 0:
+            total_units += qty
+            total_positions += 1
+
+    lines.append("")
+    lines.append(t(lang, "order_total", positions=total_positions, units=total_units))
+    lines.append(t(lang, "order_editor_hint"))
+    return "\n".join(lines)
+
+
+async def _render_order_editor(target: Message | CallbackQuery, state: FSMContext, edit: bool = False) -> None:
     data = await state.get_data()
-    if not data or "products" not in data:
+    if not data or "products" not in data or "quantities" not in data:
         await state.clear()
         return
 
-    idx = data["current_idx"]
     products = data["products"]
     lang = data.get("lang") or await db.get_user_language(_user_id(target))
-
-    if idx >= len(products):
-        await _show_order_summary(target, state)
-        return
-
-    product = products[idx]
-    text = t(lang, "qty_prompt", current=idx + 1, total=len(products), product=product["name"])
+    quantities = data["quantities"]
+    text = _order_editor_text(lang, products, quantities)
+    reply_markup = _order_editor_kb(products, quantities, lang)
 
     if isinstance(target, CallbackQuery):
-        await target.message.answer(text, reply_markup=skip_product_kb(lang))
+        if edit:
+            try:
+                await target.message.edit_text(text, reply_markup=reply_markup)
+            except Exception:
+                await target.message.edit_reply_markup(reply_markup=reply_markup)
+        else:
+            await target.message.answer(text, reply_markup=reply_markup)
     else:
-        await target.answer(text, reply_markup=skip_product_kb(lang))
+        await target.answer(text, reply_markup=reply_markup)
 
 
-@router.callback_query(F.data == "order:skip", OrderFlow.entering_quantity)
-async def skip_product(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    if not data or "order_items" not in data:
-        await callback.answer()
-        await state.clear()
-        return
-
-    items = data["order_items"]
-    items.append(0)
-    await state.update_data(order_items=items, current_idx=data["current_idx"] + 1)
+@router.callback_query(F.data == "order:noop", OrderFlow.editing)
+async def order_noop(callback: CallbackQuery) -> None:
     await callback.answer()
-    await _ask_product_quantity(callback, state)
 
 
-@router.message(OrderFlow.entering_quantity)
-async def enter_quantity(message: Message, state: FSMContext) -> None:
+async def _apply_qty_change(callback: CallbackQuery, state: FSMContext, idx: int, delta: int | None = None) -> None:
     data = await state.get_data()
-    lang = data.get("lang") if data else await db.get_user_language(message.from_user.id)
-
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer(t(lang, "qty_invalid"))
+    if not data or "products" not in data or "quantities" not in data:
+        await state.clear()
+        await callback.answer()
         return
 
-    if not data or "order_items" not in data:
-        await state.clear()
+    quantities = list(data["quantities"])
+    if idx < 0 or idx >= len(quantities):
+        await callback.answer()
         return
 
-    items = data["order_items"]
-    items.append(int(text))
-    await state.update_data(order_items=items, current_idx=data["current_idx"] + 1)
-    await _ask_product_quantity(message, state)
+    if delta is None:
+        quantities[idx] = 0
+    else:
+        quantities[idx] = max(0, quantities[idx] + delta)
+
+    await state.update_data(quantities=quantities)
+    await callback.answer()
+    await _render_order_editor(callback, state, edit=True)
 
 
-async def _show_order_summary(target: Message | CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("order:plus:"), OrderFlow.editing)
+async def order_plus(callback: CallbackQuery, state: FSMContext) -> None:
+    idx = int(callback.data.split(":")[2])
+    await _apply_qty_change(callback, state, idx, delta=1)
+
+
+@router.callback_query(F.data.startswith("order:minus:"), OrderFlow.editing)
+async def order_minus(callback: CallbackQuery, state: FSMContext) -> None:
+    idx = int(callback.data.split(":")[2])
+    await _apply_qty_change(callback, state, idx, delta=-1)
+
+
+@router.callback_query(F.data.startswith("order:zero:"), OrderFlow.editing)
+async def order_zero(callback: CallbackQuery, state: FSMContext) -> None:
+    idx = int(callback.data.split(":")[2])
+    await _apply_qty_change(callback, state, idx, delta=None)
+
+
+@router.message(OrderFlow.editing)
+async def order_editing_text(message: Message) -> None:
+    lang = await db.get_user_language(message.from_user.id)
+    await message.answer(t(lang, "order_editor_hint"))
+
+
+@router.callback_query(F.data == "order:confirm", OrderFlow.editing)
+async def confirm_order(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    if not data or "products" not in data:
+    if not data or not all(k in data for k in ("products", "quantities", "client_id", "session_id")):
         await state.clear()
+        await callback.answer()
         return
 
     products = data["products"]
-    items = data["order_items"]
-    lang = data.get("lang") or await db.get_user_language(_user_id(target))
+    items = data["quantities"]
+    lang = data.get("lang") or await db.get_user_language(callback.from_user.id)
+
+    order_items = [(products[i]["id"], items[i]) for i in range(len(products)) if items[i] > 0]
+    if not order_items:
+        await callback.answer(t(lang, "order_empty"), show_alert=True)
+        return
+
+    await db.create_order(client_id=data["client_id"], session_id=data["session_id"], items=order_items)
+
+    await state.clear()
+    await callback.answer(t(lang, "order_confirmed"))
 
     lines = [f"🧾 {t(lang, 'order_summary')}"]
     total_units = 0
@@ -317,46 +415,13 @@ async def _show_order_summary(target: Message | CallbackQuery, state: FSMContext
             lines.append(f"• {product['name']} - {qty}")
             total_units += qty
             total_positions += 1
-
-    if total_units == 0:
-        if isinstance(target, CallbackQuery):
-            await target.message.answer(t(lang, "order_empty"))
-        else:
-            await target.answer(t(lang, "order_empty"))
-        await state.clear()
-        return
-
     lines.append("")
     lines.append(t(lang, "order_total", positions=total_positions, units=total_units))
-    text = "\n".join(lines)
-
-    if isinstance(target, CallbackQuery):
-        await target.message.answer(text, reply_markup=confirm_order_kb(lang))
-    else:
-        await target.answer(text, reply_markup=confirm_order_kb(lang))
-
-
-@router.callback_query(F.data == "order:confirm")
-async def confirm_order(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    if not data or not all(k in data for k in ("products", "order_items", "client_id", "session_id")):
-        await state.clear()
-        await callback.answer()
-        return
-
-    products = data["products"]
-    items = data["order_items"]
-    lang = data.get("lang") or await db.get_user_language(callback.from_user.id)
-
-    order_items = [(products[i]["id"], items[i]) for i in range(len(products)) if items[i] > 0]
-    await db.create_order(client_id=data["client_id"], session_id=data["session_id"], items=order_items)
-
-    await state.clear()
-    await callback.answer(t(lang, "order_confirmed"))
-    await callback.message.edit_text(callback.message.text + f"\n\n✅ {t(lang, 'order_confirmed')}")
+    lines.append(f"✅ {t(lang, 'order_confirmed')}")
+    await callback.message.edit_text("\n".join(lines))
 
     client = await db.get_client_by_tg(callback.from_user.id)
-    for admin_id in config.admin_ids:
+    for admin_id in await db.get_admin_telegram_ids():
         try:
             admin_lang = await db.get_user_language(admin_id)
             lines = [t(admin_lang, "admin_new_order", name=client["name"])]
@@ -371,13 +436,12 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "order:edit")
 async def edit_order(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    if not data:
+    if not data or "products" not in data or "quantities" not in data:
         await callback.answer()
         return
-    await state.update_data(current_idx=0, order_items=[])
     await callback.answer()
-    await state.set_state(OrderFlow.entering_quantity)
-    await _ask_product_quantity(callback, state)
+    await state.set_state(OrderFlow.editing)
+    await _render_order_editor(callback, state, edit=True)
 
 
 @router.callback_query(F.data == "order:cancel")

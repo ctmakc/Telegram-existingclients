@@ -24,6 +24,7 @@ class ScheduleEntry:
 @dataclass(frozen=True)
 class Config:
     bot_token: str
+    superadmin_ids: set[int]
     admin_ids: set[int]
     schedule_open: list[ScheduleEntry]
     schedule_close: list[ScheduleEntry]
@@ -35,8 +36,11 @@ class Config:
     bot_version: str
     image_tag: str
 
+    def is_superadmin(self, user_id: int | None) -> bool:
+        return bool(user_id) and user_id in self.superadmin_ids
+
     def is_admin(self, user_id: int | None) -> bool:
-        return bool(user_id) and user_id in self.admin_ids
+        return self.is_superadmin(user_id) or (bool(user_id) and user_id in self.admin_ids)
 
 
 def _parse_admin_ids(raw: str) -> set[int]:
@@ -76,7 +80,7 @@ def _parse_schedule(raw: str) -> list[ScheduleEntry]:
 
 
 def _build_config() -> Config:
-    db_path = Path(os.getenv("DB_PATH", "bot.sqlite3")).expanduser()
+    db_path = Path(os.getenv("DB_PATH", "data/bot.sqlite3")).expanduser()
     if not db_path.is_absolute():
         db_path = (BASE_DIR / db_path).resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,9 +90,17 @@ def _build_config() -> Config:
     except ValueError:
         reminder_hours = 0
 
+    admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS", ""))
+    superadmin_ids = _parse_admin_ids(os.getenv("SUPERADMIN_IDS", ""))
+    # Backward-compatible bootstrap: if SUPERADMIN_IDS is empty, treat ADMIN_IDS as superadmins.
+    if not superadmin_ids:
+        superadmin_ids = set(admin_ids)
+        admin_ids = set()
+
     return Config(
         bot_token=os.getenv("BOT_TOKEN", "").strip(),
-        admin_ids=_parse_admin_ids(os.getenv("ADMIN_IDS", "")),
+        superadmin_ids=superadmin_ids,
+        admin_ids=admin_ids,
         schedule_open=_parse_schedule(os.getenv("SCHEDULE_OPEN", "")),
         schedule_close=_parse_schedule(os.getenv("SCHEDULE_CLOSE", "")),
         reminder_hours_before=max(0, reminder_hours),

@@ -24,7 +24,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
             [KeyboardButton(text=b(lang, "summary")), KeyboardButton(text=b(lang, "excel"))],
             [KeyboardButton(text=b(lang, "catalog")), KeyboardButton(text=b(lang, "catalog_sync"))],
             [KeyboardButton(text=b(lang, "clients")), KeyboardButton(text=b(lang, "groups"))],
-            [KeyboardButton(text=b(lang, "remind"))],
+            [KeyboardButton(text=b(lang, "remind")), KeyboardButton(text=b(lang, "admins"))],
             [KeyboardButton(text=b(lang, "switch_mode")), KeyboardButton(text=b(lang, "switch_lang"))],
         ],
         resize_keyboard=True,
@@ -138,17 +138,15 @@ def language_kb() -> InlineKeyboardMarkup:
     )
 
 
-def mode_kb(lang: str) -> InlineKeyboardMarkup:
+def mode_kb(lang: str, allow_admin: bool = False) -> InlineKeyboardMarkup:
     ru = normalize_lang(lang) == "ru"
     client_text = "👤 Клиент" if ru else "👤 Cliente"
     admin_text = "🛠 Админ" if ru else "🛠 Admin"
+    buttons = [InlineKeyboardButton(text=client_text, callback_data="mode:client")]
+    if allow_admin:
+        buttons.append(InlineKeyboardButton(text=admin_text, callback_data="mode:admin"))
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=client_text, callback_data="mode:client"),
-                InlineKeyboardButton(text=admin_text, callback_data="mode:admin"),
-            ]
-        ]
+        inline_keyboard=[buttons]
     )
 
 

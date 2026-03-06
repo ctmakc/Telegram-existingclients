@@ -4,7 +4,6 @@ services:
   bot:
     build: .
     image: ghcr.io/${GITHUB_REPOSITORY:-YOUR_GITHUB_USERNAME/telegram-existingclients}:${IMAGE_TAG:-latest}
-    container_name: minimelts-bot
     restart: unless-stopped
     env_file:
       - .env
@@ -15,7 +14,8 @@ services:
 
   watchtower:
     image: containrrr/watchtower
-    container_name: minimelts-watchtower
+    # Optional ops service; start only when profile is enabled.
+    profiles: ["watchtower"]
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

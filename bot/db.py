@@ -47,6 +47,14 @@ async def init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS admins (
+                telegram_id INTEGER PRIMARY KEY,
+                added_by INTEGER,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -174,6 +182,137 @@ async def get_user_language(telegram_id: int) -> str:
 async def get_user_mode(telegram_id: int) -> str:
     pref = await get_user_pref(telegram_id)
     return pref.get("ui_mode") or "client"
+
+
+def _base_admin_ids() -> set[int]:
+    return set(config.superadmin_ids) | set(config.admin_ids)
+
+
+async def get_dynamic_admin_ids() -> set[int]:
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT telegram_id FROM admins WHERE is_active = 1")
+        rows = await cur.fetchall()
+        return {int(r["telegram_id"]) for r in rows}
+    finally:
+        await db.close()
+
+
+async def get_admin_telegram_ids() -> set[int]:
+    ids = _base_admin_ids()
+    try:
+        ids.update(await get_dynamic_admin_ids())
+    except Exception:
+        # Graceful fallback for older DB files before migration/initialization.
+        pass
+    return ids
+
+
+async def is_admin_user(telegram_id: int | None) -> bool:
+    if not telegram_id:
+        return False
+    if telegram_id in _base_admin_ids():
+        return True
+
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT 1 FROM admins WHERE telegram_id = ? AND is_active = 1 LIMIT 1",
+            (telegram_id,),
+        )
+        return await cur.fetchone() is not None
+    finally:
+        await db.close()
+
+
+async def add_dynamic_admin(telegram_id: int, added_by: int | None = None) -> None:
+    if telegram_id in _base_admin_ids():
+        return
+
+    db = await get_db()
+    try:
+        await db.execute(
+            """
+            INSERT INTO admins (telegram_id, added_by, is_active, updated_at)
+            VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                is_active = 1,
+                added_by = COALESCE(excluded.added_by, admins.added_by),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (telegram_id, added_by),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def remove_dynamic_admin(telegram_id: int) -> bool:
+    if telegram_id in _base_admin_ids():
+        return False
+
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """
+            UPDATE admins
+            SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ? AND is_active = 1
+            """,
+            (telegram_id,),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) > 0
+    finally:
+        await db.close()
+
+
+async def list_admin_profiles() -> list[dict]:
+    dynamic_ids = await get_dynamic_admin_ids()
+    all_ids = _base_admin_ids() | dynamic_ids
+    if not all_ids:
+        return []
+
+    details: dict[int, dict] = {}
+    db = await get_db()
+    try:
+        placeholders = ",".join("?" for _ in all_ids)
+        cur = await db.execute(
+            f"""
+            SELECT telegram_id, name, company, status
+            FROM clients
+            WHERE telegram_id IN ({placeholders})
+            """,
+            tuple(all_ids),
+        )
+        for row in await cur.fetchall():
+            details[int(row["telegram_id"])] = dict(row)
+    finally:
+        await db.close()
+
+    result: list[dict] = []
+    for telegram_id in sorted(all_ids):
+        role = "admin"
+        if telegram_id in config.superadmin_ids:
+            role = "superadmin"
+        elif telegram_id in config.admin_ids:
+            role = "admin_env"
+
+        info = details.get(telegram_id) or {}
+        result.append(
+            {
+                "telegram_id": telegram_id,
+                "role": role,
+                "is_dynamic": telegram_id in dynamic_ids,
+                "name": info.get("name"),
+                "company": info.get("company"),
+                "status": info.get("status"),
+            }
+        )
+
+    role_rank = {"superadmin": 0, "admin_env": 1, "admin": 2}
+    result.sort(key=lambda item: (role_rank.get(item["role"], 9), item["telegram_id"]))
+    return result
 
 
 async def add_client(telegram_id: int, name: str, company: str | None) -> int:

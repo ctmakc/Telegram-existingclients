@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot import db
 from bot.config import config
@@ -35,10 +35,16 @@ class AddGroup(StatesGroup):
     name = State()
 
 
+class AddAdmin(StatesGroup):
+    telegram_id = State()
+
+
 async def _is_admin_view(user_id: int) -> bool:
-    if config.is_admin(user_id):
-        return True
-    return (await db.get_user_mode(user_id)) == "admin"
+    return await db.is_admin_user(user_id)
+
+
+def _is_superadmin(user_id: int) -> bool:
+    return config.is_superadmin(user_id)
 
 
 async def _admin_guard(message: Message) -> tuple[bool, str]:
@@ -47,6 +53,51 @@ async def _admin_guard(message: Message) -> tuple[bool, str]:
         await message.answer(t(lang, "admin_only_mode"))
         return False, lang
     return True, lang
+
+
+async def _superadmin_guard_message(message: Message) -> tuple[bool, str]:
+    lang = await db.get_user_language(message.from_user.id)
+    if not _is_superadmin(message.from_user.id):
+        await message.answer(t(lang, "superadmin_only"))
+        return False, lang
+    return True, lang
+
+
+async def _superadmin_guard_callback(callback: CallbackQuery) -> tuple[bool, str]:
+    lang = await db.get_user_language(callback.from_user.id)
+    if not _is_superadmin(callback.from_user.id):
+        await callback.answer()
+        await callback.message.answer(t(lang, "superadmin_only"))
+        return False, lang
+    return True, lang
+
+
+def _admin_role_label(lang: str, role: str) -> str:
+    labels = {
+        "superadmin": t(lang, "admin_role_superadmin"),
+        "admin_env": t(lang, "admin_role_fixed"),
+        "admin": t(lang, "admin_role_admin"),
+    }
+    return labels.get(role, role)
+
+
+def _admins_manage_kb(profiles: list[dict], lang: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for profile in profiles:
+        if profile["role"] != "admin":
+            continue
+        label = f"➖ {profile['telegram_id']}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"admins:remove:{profile['telegram_id']}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text=t(lang, "admins_add_button"), callback_data="admins:add")])
+    rows.append([InlineKeyboardButton(text=t(lang, "admins_refresh"), callback_data="admins:refresh")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _send_group_reminder(bot, group_id: int) -> tuple[int, int, str]:
@@ -67,6 +118,114 @@ async def _send_group_reminder(bot, group_id: int) -> tuple[int, int, str]:
         except Exception:
             logger.warning("Failed to send group reminder to %s", client["telegram_id"])
     return sent, len(clients), group["name"]
+
+
+async def _render_admins_panel(lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    profiles = await db.list_admin_profiles()
+    lines = [t(lang, "admins_title")]
+    if not profiles:
+        lines.append(t(lang, "admins_empty"))
+        return "\n".join(lines), _admins_manage_kb([], lang)
+
+    for profile in profiles:
+        role = _admin_role_label(lang, profile["role"])
+        suffix = ""
+        if profile.get("name"):
+            suffix = f" - {profile['name']}"
+            if profile.get("company"):
+                suffix += f" ({profile['company']})"
+        lines.append(f"• {profile['telegram_id']} [{role}]{suffix}")
+    return "\n".join(lines), _admins_manage_kb(profiles, lang)
+
+
+@router.message(Command("admins"))
+@router.message(F.text.in_(action_labels("admins")))
+async def manage_admins(message: Message) -> None:
+    allowed, lang = await _superadmin_guard_message(message)
+    if not allowed:
+        return
+    text, kb = await _render_admins_panel(lang)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "admins:add")
+async def admins_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+    allowed, lang = await _superadmin_guard_callback(callback)
+    if not allowed:
+        return
+    await callback.answer()
+    await callback.message.answer(t(lang, "admins_add_prompt"))
+    await state.set_state(AddAdmin.telegram_id)
+
+
+@router.message(AddAdmin.telegram_id)
+async def admins_add_finish(message: Message, state: FSMContext) -> None:
+    allowed, lang = await _superadmin_guard_message(message)
+    if not allowed:
+        await state.clear()
+        return
+
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer(t(lang, "admins_invalid_id"))
+        return
+
+    telegram_id = int(raw)
+    if telegram_id <= 0:
+        await message.answer(t(lang, "admins_invalid_id"))
+        return
+
+    if config.is_superadmin(telegram_id):
+        await state.clear()
+        await message.answer(t(lang, "admins_already_superadmin"))
+        return
+
+    if await db.is_admin_user(telegram_id):
+        await state.clear()
+        await message.answer(t(lang, "admins_already_admin", id=telegram_id))
+        return
+
+    await db.add_dynamic_admin(telegram_id, added_by=message.from_user.id)
+    await state.clear()
+    text, kb = await _render_admins_panel(lang)
+    await message.answer(t(lang, "admins_added", id=telegram_id))
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "admins:refresh")
+async def admins_refresh(callback: CallbackQuery) -> None:
+    allowed, lang = await _superadmin_guard_callback(callback)
+    if not allowed:
+        return
+    text, kb = await _render_admins_panel(lang)
+    await callback.answer("OK")
+    await callback.message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("admins:remove:"))
+async def admins_remove(callback: CallbackQuery) -> None:
+    allowed, lang = await _superadmin_guard_callback(callback)
+    if not allowed:
+        return
+
+    telegram_id = int(callback.data.split(":")[2])
+    if config.is_superadmin(telegram_id):
+        await callback.answer()
+        await callback.message.answer(t(lang, "admins_cannot_remove_superadmin"))
+        return
+    if telegram_id in config.admin_ids:
+        await callback.answer()
+        await callback.message.answer(t(lang, "admins_cannot_remove_fixed"))
+        return
+
+    removed = await db.remove_dynamic_admin(telegram_id)
+    await callback.answer("OK")
+    if removed:
+        await callback.message.answer(t(lang, "admins_removed", id=telegram_id))
+    else:
+        await callback.message.answer(t(lang, "admins_not_found", id=telegram_id))
+    text, kb = await _render_admins_panel(lang)
+    await callback.message.answer(text, reply_markup=kb)
 
 
 @router.message(F.text.in_(action_labels("open_orders")))
@@ -525,7 +684,9 @@ async def approve_client(callback: CallbackQuery) -> None:
         client_lang = await db.get_user_language(client["telegram_id"])
         from bot.keyboards import menu_kb
 
-        mode = await db.get_user_mode(client["telegram_id"])
+        user_mode = await db.get_user_mode(client["telegram_id"])
+        is_admin = await db.is_admin_user(client["telegram_id"])
+        mode = "admin" if is_admin and user_mode == "admin" else "client"
         await callback.bot.send_message(
             client["telegram_id"],
             t(client_lang, "client_approved", name=client["name"]),

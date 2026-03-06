@@ -5,8 +5,19 @@ services:
     build: .
     image: ghcr.io/${GITHUB_REPOSITORY:-YOUR_GITHUB_USERNAME/telegram-existingclients}:${IMAGE_TAG:-latest}
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - SUPERADMIN_IDS=${SUPERADMIN_IDS}
+      - ADMIN_IDS=${ADMIN_IDS:-}
+      - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-ru}
+      - DB_PATH=${DB_PATH:-data/bot.sqlite3}
+      - CATALOG_SOURCE_URL=${CATALOG_SOURCE_URL:-https://minimelts.es/sabores/}
+      - BOT_VERSION=${BOT_VERSION:-dev}
+      - IMAGE_TAG=${IMAGE_TAG:-latest}
+      - SCHEDULE_OPEN=${SCHEDULE_OPEN:-MON:09:00,THU:09:00}
+      - SCHEDULE_CLOSE=${SCHEDULE_CLOSE:-WED:20:00,SAT:20:00}
+      - REMINDER_HOURS_BEFORE=${REMINDER_HOURS_BEFORE:-4}
+      - TIMEZONE=${TIMEZONE:-Europe/Madrid}
     volumes:
       - bot-data:/app/data
     labels:

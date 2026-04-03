@@ -71,6 +71,129 @@ async def _show_menu(target: Message | CallbackQuery) -> None:
         await target.answer(text, reply_markup=menu_kb(lang, mode))
 
 
+def _edit_order_kb(session_id: int, lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t(lang, "edit_active_order"),
+                    callback_data=f"order:edit_active:{session_id}",
+                )
+            ]
+        ]
+    )
+
+
+async def _start_order_flow(
+    target: Message | CallbackQuery,
+    state: FSMContext,
+    *,
+    announce_loaded: bool = False,
+) -> None:
+    user_id = _user_id(target)
+    lang = await db.get_user_language(user_id)
+    client = await db.get_client_by_tg(user_id)
+    if not client:
+        if isinstance(target, CallbackQuery):
+            await target.answer()
+            await target.message.answer(t(lang, "welcome_new"))
+            await target.message.answer(t(lang, "ask_name"))
+        else:
+            await target.answer(t(lang, "welcome_new"))
+            await target.answer(t(lang, "ask_name"))
+        await state.set_state(Registration.name)
+        return
+
+    if client["status"] != "approved":
+        text = t(lang, "pending") if client["status"] == "pending" else t(lang, "blocked")
+        if isinstance(target, CallbackQuery):
+            await target.answer()
+            await target.message.answer(text)
+        else:
+            await target.answer(text)
+        return
+
+    session = await db.get_active_session()
+    if not session:
+        if isinstance(target, CallbackQuery):
+            await target.answer()
+            await target.message.answer(t(lang, "orders_closed"))
+        else:
+            await target.answer(t(lang, "orders_closed"))
+        return
+
+    products = await db.get_active_products()
+    if not products:
+        if isinstance(target, CallbackQuery):
+            await target.answer()
+            await target.message.answer(t(lang, "no_products"))
+        else:
+            await target.answer(t(lang, "no_products"))
+        return
+
+    existing_order = await db.get_order_for_client_session(client["id"], session["id"])
+    existing_items = {
+        int(item["product_id"]): int(item["quantity"])
+        for item in (existing_order or {}).get("items", [])
+    }
+    quantities = [existing_items.get(int(product["id"]), 0) for product in products]
+
+    await state.update_data(
+        session_id=session["id"],
+        client_id=client["id"],
+        products=products,
+        quantities=quantities,
+        lang=lang,
+        existing_order_id=(existing_order or {}).get("id"),
+    )
+    await state.set_state(OrderFlow.editing)
+
+    if announce_loaded and existing_order:
+        if isinstance(target, CallbackQuery):
+            await target.answer()
+            await target.message.answer(t(lang, "edit_order_loaded"))
+        else:
+            await target.answer(t(lang, "edit_order_loaded"))
+
+    await _render_order_editor(target, state)
+
+
+async def _notify_about_order(
+    callback: CallbackQuery,
+    client: dict,
+    products: list[dict],
+    items: list[int],
+    *,
+    updated: bool,
+) -> None:
+    header_key = "admin_updated_order" if updated else "admin_new_order"
+    text_lines_cache: dict[int, str] = {}
+    admin_ids = set(await db.get_admin_telegram_ids())
+    recipients = set(admin_ids)
+    if config.order_feed_chat_id:
+        recipients.add(config.order_feed_chat_id)
+
+    for recipient_id in recipients:
+        if recipient_id in admin_ids:
+            lang = await db.get_user_language(recipient_id)
+        else:
+            lang = config.default_language
+
+        lines = [t(lang, header_key, name=client["name"])]
+        if client.get("company"):
+            lines.append(client["company"])
+        for product, qty in zip(products, items):
+            if qty > 0:
+                lines.append(f"• {product['name']} - {qty}")
+        text_lines_cache[recipient_id] = "\n".join(lines)
+
+    for recipient_id, text in text_lines_cache.items():
+        try:
+            await callback.bot.send_message(recipient_id, text)
+        except Exception:
+            logger.warning("Failed to notify recipient %s about order", recipient_id)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await db.ensure_user_pref(message.from_user.id)
@@ -226,37 +349,7 @@ async def text_router(message: Message, state: FSMContext) -> None:
 
 
 async def new_order(message: Message, state: FSMContext) -> None:
-    lang = await db.get_user_language(message.from_user.id)
-    client = await db.get_client_by_tg(message.from_user.id)
-    if not client:
-        await message.answer(t(lang, "welcome_new"))
-        await message.answer(t(lang, "ask_name"))
-        await state.set_state(Registration.name)
-        return
-
-    if client["status"] != "approved":
-        await message.answer(t(lang, "pending") if client["status"] == "pending" else t(lang, "blocked"))
-        return
-
-    session = await db.get_active_session()
-    if not session:
-        await message.answer(t(lang, "orders_closed"))
-        return
-
-    products = await db.get_active_products()
-    if not products:
-        await message.answer(t(lang, "no_products"))
-        return
-
-    await state.update_data(
-        session_id=session["id"],
-        client_id=client["id"],
-        products=products,
-        quantities=[0 for _ in products],
-        lang=lang,
-    )
-    await state.set_state(OrderFlow.editing)
-    await _render_order_editor(message, state)
+    await _start_order_flow(message, state, announce_loaded=True)
 
 
 def _short_name(name: str, limit: int = 18) -> str:
@@ -306,6 +399,7 @@ def _order_editor_text(lang: str, products: list[dict], quantities: list[int]) -
 
     lines.append("")
     lines.append(t(lang, "order_total", positions=total_positions, units=total_units))
+    lines.append(t(lang, "order_change_hint"))
     lines.append(t(lang, "order_editor_hint"))
     return "\n".join(lines)
 
@@ -396,6 +490,7 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext) -> None:
     products = data["products"]
     items = data["quantities"]
     lang = data.get("lang") or await db.get_user_language(callback.from_user.id)
+    was_update = bool(data.get("existing_order_id"))
 
     order_items = [(products[i]["id"], items[i]) for i in range(len(products)) if items[i] > 0]
     if not order_items:
@@ -405,7 +500,7 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext) -> None:
     await db.create_order(client_id=data["client_id"], session_id=data["session_id"], items=order_items)
 
     await state.clear()
-    await callback.answer(t(lang, "order_confirmed"))
+    await callback.answer(t(lang, "order_updated" if was_update else "order_confirmed"))
 
     lines = [f"🧾 {t(lang, 'order_summary')}"]
     total_units = 0
@@ -417,20 +512,11 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext) -> None:
             total_positions += 1
     lines.append("")
     lines.append(t(lang, "order_total", positions=total_positions, units=total_units))
-    lines.append(f"✅ {t(lang, 'order_confirmed')}")
+    lines.append(f"✅ {t(lang, 'order_updated' if was_update else 'order_confirmed')}")
     await callback.message.edit_text("\n".join(lines))
 
     client = await db.get_client_by_tg(callback.from_user.id)
-    for admin_id in await db.get_admin_telegram_ids():
-        try:
-            admin_lang = await db.get_user_language(admin_id)
-            lines = [t(admin_lang, "admin_new_order", name=client["name"])]
-            for product, qty in zip(products, items):
-                if qty > 0:
-                    lines.append(f"• {product['name']} - {qty}")
-            await callback.bot.send_message(admin_id, "\n".join(lines))
-        except Exception:
-            logger.warning("Failed to notify admin %s about order", admin_id)
+    await _notify_about_order(callback, client, products, items, updated=was_update)
 
 
 @router.callback_query(F.data == "order:edit")
@@ -452,6 +538,11 @@ async def cancel_order(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_text(t(lang, "order_cancelled"))
 
 
+@router.callback_query(F.data.startswith("order:edit_active:"))
+async def edit_active_order(callback: CallbackQuery, state: FSMContext) -> None:
+    await _start_order_flow(callback, state, announce_loaded=True)
+
+
 async def my_orders(message: Message) -> None:
     lang = await db.get_user_language(message.from_user.id)
     client = await db.get_client_by_tg(message.from_user.id)
@@ -471,4 +562,8 @@ async def my_orders(message: Message) -> None:
             lines.append(f"• {item['name']} - {item['quantity']}")
             total += item["quantity"]
         lines.append(t(lang, "total_units", units=total))
-        await message.answer("\n".join(lines))
+        reply_markup = None
+        active_session = await db.get_active_session()
+        if active_session and int(order.get("session_id", 0)) == int(active_session["id"]):
+            reply_markup = _edit_order_kb(active_session["id"], lang)
+        await message.answer("\n".join(lines), reply_markup=reply_markup)

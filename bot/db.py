@@ -37,6 +37,11 @@ async def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 note TEXT,
+                reminder_day TEXT,
+                reminder_hour INTEGER,
+                reminder_minute INTEGER,
+                reminder_enabled INTEGER NOT NULL DEFAULT 0,
+                last_reminded_session_id INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -98,6 +103,21 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE clients ADD COLUMN language TEXT NOT NULL DEFAULT 'ru'")
         if cols and "group_id" not in cols:
             await db.execute("ALTER TABLE clients ADD COLUMN group_id INTEGER")
+
+        cur = await db.execute("PRAGMA table_info(client_groups)")
+        cols = [r["name"] for r in await cur.fetchall()]
+        if cols and "reminder_day" not in cols:
+            await db.execute("ALTER TABLE client_groups ADD COLUMN reminder_day TEXT")
+        if cols and "reminder_hour" not in cols:
+            await db.execute("ALTER TABLE client_groups ADD COLUMN reminder_hour INTEGER")
+        if cols and "reminder_minute" not in cols:
+            await db.execute("ALTER TABLE client_groups ADD COLUMN reminder_minute INTEGER")
+        if cols and "reminder_enabled" not in cols:
+            await db.execute(
+                "ALTER TABLE client_groups ADD COLUMN reminder_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        if cols and "last_reminded_session_id" not in cols:
+            await db.execute("ALTER TABLE client_groups ADD COLUMN last_reminded_session_id INTEGER")
 
         cur = await db.execute("PRAGMA table_info(order_sessions)")
         cols = [r["name"] for r in await cur.fetchall()]
@@ -477,6 +497,74 @@ async def set_client_group(client_id: int, group_id: int | None) -> None:
         await db.close()
 
 
+async def set_group_reminder_schedule(
+    group_id: int,
+    day: str | None,
+    hour: int | None,
+    minute: int | None,
+    enabled: bool,
+) -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            """
+            UPDATE client_groups
+            SET reminder_day = ?,
+                reminder_hour = ?,
+                reminder_minute = ?,
+                reminder_enabled = ?,
+                last_reminded_session_id = NULL
+            WHERE id = ?
+            """,
+            (day, hour, minute, 1 if enabled else 0, group_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_groups_due_for_reminder(
+    day: str,
+    hour: int,
+    minute: int,
+    session_id: int,
+) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """
+            SELECT *
+            FROM client_groups
+            WHERE reminder_enabled = 1
+              AND reminder_day = ?
+              AND reminder_hour = ?
+              AND reminder_minute = ?
+              AND COALESCE(last_reminded_session_id, 0) != ?
+            ORDER BY name COLLATE NOCASE, id
+            """,
+            (day, hour, minute, session_id),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def mark_group_reminder_sent(group_id: int, session_id: int) -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            """
+            UPDATE client_groups
+            SET last_reminded_session_id = ?
+            WHERE id = ?
+            """,
+            (session_id, group_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
 async def get_active_products() -> list[dict]:
     db = await get_db()
     try:
@@ -726,6 +814,39 @@ async def create_order(client_id: int, session_id: int, items: list[tuple[int, i
 
         await db.commit()
         return order_id
+    finally:
+        await db.close()
+
+
+async def get_order_for_client_session(client_id: int, session_id: int) -> dict | None:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """
+            SELECT *
+            FROM orders
+            WHERE client_id = ? AND session_id = ?
+            LIMIT 1
+            """,
+            (client_id, session_id),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+
+        order = dict(row)
+        cur = await db.execute(
+            """
+            SELECT oi.product_id, oi.quantity, p.name
+            FROM order_items oi
+            JOIN products p ON p.id = oi.product_id
+            WHERE oi.order_id = ?
+            ORDER BY p.sort_order, p.id
+            """,
+            (order["id"],),
+        )
+        order["items"] = [dict(r) for r in await cur.fetchall()]
+        return order
     finally:
         await db.close()
 

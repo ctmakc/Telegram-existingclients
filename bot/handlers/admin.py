@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -37,6 +38,10 @@ class AddGroup(StatesGroup):
 
 class AddAdmin(StatesGroup):
     telegram_id = State()
+
+
+class GroupReminderSchedule(StatesGroup):
+    value = State()
 
 
 async def _is_admin_view(user_id: int) -> bool:
@@ -81,6 +86,17 @@ def _admin_role_label(lang: str, role: str) -> str:
     return labels.get(role, role)
 
 
+def _group_schedule_text(lang: str, group: dict) -> str:
+    if not group.get("reminder_enabled") or not group.get("reminder_day"):
+        return t(lang, "group_schedule_none")
+    return t(
+        lang,
+        "group_schedule_set",
+        day=group["reminder_day"],
+        time=f"{int(group['reminder_hour']):02d}:{int(group['reminder_minute']):02d}",
+    )
+
+
 def _admins_manage_kb(profiles: list[dict], lang: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for profile in profiles:
@@ -118,6 +134,21 @@ async def _send_group_reminder(bot, group_id: int) -> tuple[int, int, str]:
         except Exception:
             logger.warning("Failed to send group reminder to %s", client["telegram_id"])
     return sent, len(clients), group["name"]
+
+
+def _parse_group_schedule(raw: str) -> tuple[str | None, int | None, int | None, bool] | None:
+    value = (raw or "").strip().upper()
+    if value == "OFF":
+        return None, None, None, False
+    match = re.fullmatch(r"(MON|TUE|WED|THU|FRI|SAT|SUN)\s+(\d{1,2}):(\d{2})", value)
+    if not match:
+        return None
+    day = match.group(1)
+    hour = int(match.group(2))
+    minute = int(match.group(3))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return day, hour, minute, True
 
 
 async def _render_admins_panel(lang: str) -> tuple[str, InlineKeyboardMarkup]:
@@ -542,13 +573,18 @@ async def group_view(callback: CallbackQuery) -> None:
     lang = await db.get_user_language(callback.from_user.id)
     await callback.answer()
     await callback.message.answer(
-        t(
-            lang,
-            "group_details",
-            name=group["name"],
-            clients_total=group.get("clients_total", 0),
-            approved_total=group.get("approved_total", 0),
-            without_order=without_order,
+        "\n".join(
+            [
+                t(
+                    lang,
+                    "group_details",
+                    name=group["name"],
+                    clients_total=group.get("clients_total", 0),
+                    approved_total=group.get("approved_total", 0),
+                    without_order=without_order,
+                ),
+                _group_schedule_text(lang, group),
+            ]
         ),
         reply_markup=group_actions_kb(group_id, lang),
     )
@@ -571,6 +607,51 @@ async def group_remind(callback: CallbackQuery) -> None:
         await callback.message.answer(t(lang, "group_remind_none"))
         return
     await callback.message.answer(t(lang, "group_remind_sent", sent=sent, total=total))
+
+
+@router.callback_query(F.data.startswith("group:schedule:"))
+async def group_schedule_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _is_admin_view(callback.from_user.id):
+        await callback.answer()
+        return
+    group_id = int(callback.data.split(":")[2])
+    group = await db.get_client_group(group_id)
+    if not group:
+        await callback.answer()
+        return
+    lang = await db.get_user_language(callback.from_user.id)
+    await state.set_state(GroupReminderSchedule.value)
+    await state.update_data(group_id=group_id)
+    await callback.answer()
+    await callback.message.answer(
+        f"{group['name']}\n{_group_schedule_text(lang, group)}\n\n{t(lang, 'group_schedule_prompt')}"
+    )
+
+
+@router.message(GroupReminderSchedule.value)
+async def group_schedule_finish(message: Message, state: FSMContext) -> None:
+    allowed, lang = await _admin_guard(message)
+    if not allowed:
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    group_id = int(data.get("group_id", 0))
+    parsed = _parse_group_schedule(message.text or "")
+    if parsed is None:
+        await message.answer(t(lang, "group_schedule_invalid"))
+        return
+
+    day, hour, minute, enabled = parsed
+    await db.set_group_reminder_schedule(group_id, day, hour, minute, enabled)
+    group = await db.get_client_group(group_id)
+    await state.clear()
+    if enabled:
+        await message.answer(
+            f"{t(lang, 'group_schedule_saved')}\n{_group_schedule_text(lang, group or {})}"
+        )
+    else:
+        await message.answer(t(lang, "group_schedule_cleared"))
 
 
 @router.message(F.text.in_(action_labels("clients")))

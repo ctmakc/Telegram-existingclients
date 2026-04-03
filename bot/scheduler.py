@@ -1,7 +1,9 @@
 """APScheduler-based automation for order sessions."""
 from __future__ import annotations
 
+from datetime import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
@@ -27,6 +29,8 @@ DAY_MAP = {
     "SAT": "sat",
     "SUN": "sun",
 }
+
+DAY_CODES = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 
 
 def _find_next_close(open_entry: ScheduleEntry) -> ScheduleEntry | None:
@@ -154,11 +158,45 @@ async def _auto_close(bot: Bot) -> None:
         logger.exception("Error in auto-close")
 
 
-def setup_scheduler(bot: Bot):
-    if not config.schedule_open and not config.schedule_close:
-        logger.info("No schedule configured, scheduler disabled")
-        return None
+async def _auto_group_reminders(bot: Bot) -> None:
+    try:
+        session = await db.get_active_session()
+        if not session:
+            return
 
+        now = datetime.now(ZoneInfo(config.timezone))
+        day_code = DAY_CODES[now.weekday()]
+        groups = await db.get_groups_due_for_reminder(day_code, now.hour, now.minute, session["id"])
+        if not groups:
+            return
+
+        for group in groups:
+            clients = await db.get_clients_without_order(session["id"], group_id=group["id"])
+            sent = 0
+            for client in clients:
+                try:
+                    lang = await db.get_user_language(client["telegram_id"])
+                    await bot.send_message(client["telegram_id"], t(lang, "admin_remind_notice"))
+                    sent += 1
+                except Exception:
+                    logger.warning("Failed to send scheduled reminder to %s", client["telegram_id"])
+
+            await db.mark_group_reminder_sent(group["id"], session["id"])
+
+            for admin_id in await db.get_admin_telegram_ids():
+                try:
+                    lang = await db.get_user_language(admin_id)
+                    await bot.send_message(
+                        admin_id,
+                        t(lang, "group_remind_sent", sent=sent, total=len(clients)) + f" [{group['name']}]",
+                    )
+                except Exception:
+                    logger.warning("Failed to notify admin %s about group reminder", admin_id)
+    except Exception:
+        logger.exception("Error in auto-group-reminders")
+
+
+def setup_scheduler(bot: Bot):
     if AsyncIOScheduler is None or CronTrigger is None:
         logger.warning("apscheduler is not installed; scheduler disabled")
         return None
@@ -204,5 +242,13 @@ def setup_scheduler(bot: Bot):
                 id=f"auto_remind_{entry.day}_{entry.hour}_{entry.minute}",
                 replace_existing=True,
             )
+
+    scheduler.add_job(
+        _auto_group_reminders,
+        CronTrigger(second=0, timezone=config.timezone),
+        args=[bot],
+        id="auto_group_reminders",
+        replace_existing=True,
+    )
 
     return scheduler

@@ -26,6 +26,7 @@ class Config:
     bot_token: str
     superadmin_ids: set[int]
     admin_ids: set[int]
+    order_feed_chat_id: int | None
     schedule_open: list[ScheduleEntry]
     schedule_close: list[ScheduleEntry]
     reminder_hours_before: int
@@ -54,6 +55,16 @@ def _parse_admin_ids(raw: str) -> set[int]:
         except ValueError:
             continue
     return result
+
+
+def _parse_optional_int(raw: str) -> int | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _parse_schedule(raw: str) -> list[ScheduleEntry]:
@@ -101,6 +112,7 @@ def _build_config() -> Config:
         bot_token=os.getenv("BOT_TOKEN", "").strip(),
         superadmin_ids=superadmin_ids,
         admin_ids=admin_ids,
+        order_feed_chat_id=_parse_optional_int(os.getenv("ORDER_FEED_CHAT_ID", "")),
         schedule_open=_parse_schedule(os.getenv("SCHEDULE_OPEN", "")),
         schedule_close=_parse_schedule(os.getenv("SCHEDULE_CLOSE", "")),
         reminder_hours_before=max(0, reminder_hours),

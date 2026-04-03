@@ -9,6 +9,7 @@ services:
       - BOT_TOKEN=${BOT_TOKEN}
       - SUPERADMIN_IDS=${SUPERADMIN_IDS}
       - ADMIN_IDS=${ADMIN_IDS:-}
+      - ORDER_FEED_CHAT_ID=${ORDER_FEED_CHAT_ID:-}
       - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-ru}
       - DB_PATH=${DB_PATH:-data/bot.sqlite3}
       - CATALOG_SOURCE_URL=${CATALOG_SOURCE_URL:-https://minimelts.es/sabores/}

@@ -176,7 +176,13 @@ def group_actions_kb(group_id: int, lang: str) -> InlineKeyboardMarkup:
                     text=("🔔 Напомнить группе" if ru else "🔔 Recordar grupo"),
                     callback_data=f"group:remind:{group_id}",
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text=("⏰ Настроить напоминание" if ru else "⏰ Configurar recordatorio"),
+                    callback_data=f"group:schedule:{group_id}",
+                )
+            ],
         ]
     )
 
